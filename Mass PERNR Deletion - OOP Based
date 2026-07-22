@@ -1,0 +1,997 @@
+*---------------------------------------------------------------------*
+* Program Name  : ZPA30_BULK_DELETE_OOP_BASED
+* Description   : Report Program for Bulk PERNR Deletion through PA30
+*
+* Module        : HCM - HR Master Data Management
+* Transaction   : ZPA30
+*
+* Author        : Gaurav Prajapati (PGAURAV)
+* Created On    : 03.July.2026
+*
+*---------------------------------------------------------------------*
+* Change History
+*---------------------------------------------------------------------*
+* Date        | Request No  | Changed By |    TR      |
+* Description :
+*---------------------------------------------------------------------*
+
+REPORT zpa30_bulk_delete_oop_based.
+
+TABLES: pernr.
+
+CONSTANTS:
+  c_mod_so TYPE c LENGTH 2 VALUE 'SO',
+  c_mod_fl TYPE c LENGTH 2 VALUE 'FL'.
+
+"======================================================================
+" Type Definitions
+"======================================================================
+
+"Sorted table is used to automatically remove duplicate PERNR entries.
+"UNIQUE KEY table_line ensures one personnel number is processed only once.
+TYPES:
+  tt_pernr TYPE SORTED TABLE OF pernr_d WITH UNIQUE KEY table_line.
+
+"BDC table type used for CALL TRANSACTION processing.
+"Defining a named table type avoids syntax issues in OO method signatures.
+TYPES:
+  tt_bdcdata TYPE STANDARD TABLE OF bdcdata WITH EMPTY KEY.
+
+"BDC message table type used to collect messages returned by CALL TRANSACTION.
+TYPES:
+  tt_bdcmsg TYPE STANDARD TABLE OF bdcmsgcoll WITH EMPTY KEY.
+
+"Application log structure used for final ALV output.
+TYPES:
+  BEGIN OF ty_log,
+    pernr   TYPE pernr_d,
+    status  TYPE string,
+    message TYPE string,
+    tcode   TYPE sy-tcode,
+    uname   TYPE syuname,
+    datum   TYPE sydatum,
+    uzeit   TYPE syuzeit,
+  END OF ty_log.
+
+"======================================================================
+" Selection Screen
+"======================================================================
+
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-t01.
+
+  PARAMETERS:
+    p_so   RADIOBUTTON GROUP g1 DEFAULT 'X' USER-COMMAND ucmd,
+    p_file RADIOBUTTON GROUP g1.
+
+  SELECTION-SCREEN SKIP.
+
+  SELECT-OPTIONS:
+    s_pernr FOR pernr-pernr NO INTERVALS MODIF ID so.
+
+  "RLGRAP-FILENAME is used for compatibility with frontend file dialogs.
+  PARAMETERS:
+    p_path TYPE rlgrap-filename MODIF ID fl.
+
+SELECTION-SCREEN END OF BLOCK b1.
+
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-t03.
+
+  "When selected, program only validates/builds input but does not execute PA30 deletion.
+  PARAMETERS:
+    p_test TYPE abap_bool AS CHECKBOX DEFAULT abap_true.
+
+  "BDC display mode:
+  "A = Display all screens
+  "E = Display only errors
+  "N = No display
+  PARAMETERS:
+    p_mode TYPE ctu_params-dismode DEFAULT 'N'.
+
+SELECTION-SCREEN END OF BLOCK b3.
+
+SELECTION-SCREEN SKIP 1.
+
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-t02.
+  SELECTION-SCREEN COMMENT /1(79) TEXT-i01.
+  SELECTION-SCREEN COMMENT /1(79) TEXT-i02.
+  SELECTION-SCREEN COMMENT /1(79) TEXT-i03.
+  SELECTION-SCREEN COMMENT /1(79) TEXT-i04.
+SELECTION-SCREEN END OF BLOCK b2.
+
+"======================================================================
+" Local Application Class
+"======================================================================
+
+CLASS lcl_pa30_bulk_delete DEFINITION FINAL.
+
+  PUBLIC SECTION.
+
+    "Checks whether current user is authorized for custom transaction ZPA30.
+    METHODS check_initial_authority.
+
+    "Checks authorization again before actual processing starts.
+    METHODS check_execution_authority.
+
+    "Handles dynamic enable/disable of selection-screen fields.
+    METHODS handle_selection_screen_output.
+
+    "Opens frontend file selection dialog for TXT/CSV file.
+    METHODS handle_file_f4
+      CHANGING
+        cv_path TYPE rlgrap-filename.
+
+    "Validates individual PERNR values entered in select-option.
+    METHODS validate_select_options.
+
+    "Validates complete selection-screen input when user executes the report.
+    METHODS validate_execution_request.
+
+    "Main processing method called from START-OF-SELECTION.
+    METHODS run.
+
+  PRIVATE SECTION.
+
+    DATA:
+      mt_pernr   TYPE tt_pernr,
+      mt_log     TYPE STANDARD TABLE OF ty_log WITH EMPTY KEY,
+      mt_bdcdata TYPE STANDARD TABLE OF bdcdata WITH EMPTY KEY,
+      mt_msg     TYPE STANDARD TABLE OF bdcmsgcoll WITH EMPTY KEY.
+
+    "Builds internal PERNR list from select-option input.
+    METHODS build_pernr_from_selectopt
+      CHANGING
+        ct_pernr TYPE tt_pernr.
+
+    "Builds internal PERNR list from uploaded file path.
+    METHODS build_pernr_from_file
+      IMPORTING
+        iv_path  TYPE rlgrap-filename
+      CHANGING
+        ct_pernr TYPE tt_pernr.
+
+    "Reads TXT/CSV file from frontend and extracts one PERNR per line.
+    METHODS read_txt_file
+      IMPORTING
+        iv_path  TYPE rlgrap-filename
+      CHANGING
+        ct_pernr TYPE tt_pernr.
+
+    "Applies ALPHA_INPUT conversion to normalize PERNR format.
+    METHODS normalize_pernr
+      CHANGING
+        cv_pernr TYPE pernr_d.
+
+    "Processes one PERNR through PA30 BDC deletion flow.
+    METHODS process_pernr
+      IMPORTING
+        iv_pernr TYPE pernr_d.
+
+    "Builds PA30 BDC data based on SHDB recording.
+    METHODS build_bdcdata
+      IMPORTING
+        iv_pernr   TYPE pernr_d
+      CHANGING
+        ct_bdcdata TYPE tt_bdcdata.
+
+    "Adds a BDC screen start entry.
+    METHODS bdc_dynpro
+      IMPORTING
+        iv_prog    TYPE progname
+        iv_dyn     TYPE sydynnr
+      CHANGING
+        ct_bdcdata TYPE tt_bdcdata.
+
+    "Adds a BDC field-value entry.
+    METHODS bdc_field
+      IMPORTING
+        iv_fnam    TYPE bdcdata-fnam
+        iv_fval    TYPE any
+      CHANGING
+        ct_bdcdata TYPE tt_bdcdata.
+
+    "Adds one entry to final processing log.
+    METHODS add_log
+      IMPORTING
+        iv_pernr TYPE pernr_d
+        iv_stat  TYPE string
+        iv_msg   TYPE string.
+
+    "Displays processing log using SALV. Falls back to WRITE output on SALV error.
+    METHODS display_log.
+
+    "Validates selected frontend file path, extension, foreground mode, and existence.
+    METHODS validate_file
+      IMPORTING
+        iv_path TYPE rlgrap-filename.
+
+ENDCLASS.
+
+CLASS lcl_pa30_bulk_delete IMPLEMENTATION.
+
+  METHOD check_initial_authority.
+
+    "Early authorization check prevents unauthorized access to the report screen.
+    AUTHORITY-CHECK OBJECT 'S_TCODE'
+      ID 'TCD' FIELD 'ZPA30'.
+
+    IF sy-subrc <> 0.
+      MESSAGE 'You are not authorized to execute this transaction.' TYPE 'E'.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD check_execution_authority.
+
+    "Second authorization check protects actual execution even if screen is reached.
+    AUTHORITY-CHECK OBJECT 'S_TCODE'
+      ID 'TCD' FIELD 'ZPA30'.
+
+    IF sy-subrc <> 0.
+      MESSAGE e077(s#) WITH 'ZPA30'.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD handle_selection_screen_output.
+
+    "Enable select-option only when PERNR input radio button is selected.
+    "Enable file path only when file upload radio button is selected.
+    LOOP AT SCREEN.
+
+      CASE screen-group1.
+
+        WHEN c_mod_so.
+          IF p_so = abap_true.
+            screen-input = 1.
+          ELSE.
+            screen-input = 0.
+          ENDIF.
+
+        WHEN c_mod_fl.
+          IF p_file = abap_true.
+            screen-input = 1.
+          ELSE.
+            screen-input = 0.
+          ENDIF.
+
+      ENDCASE.
+
+      MODIFY SCREEN.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+  METHOD handle_file_f4.
+
+    DATA:
+      lt_files TYPE filetable,
+      lv_rc    TYPE i,
+      ls_file  TYPE file_table.
+
+    TRY.
+
+        "Open frontend file selection popup and restrict visible files to TXT/CSV.
+        cl_gui_frontend_services=>file_open_dialog(
+          EXPORTING
+            window_title   = 'Select TXT/CSV file'
+            multiselection = abap_false
+            file_filter    = 'TXT/CSV (*.txt;*.csv)|*.txt;*.csv|All (*.*)|*.*'
+          CHANGING
+            file_table     = lt_files
+            rc             = lv_rc ).
+
+        "If user selected a file, move selected filename to selection-screen parameter.
+        IF lv_rc > 0.
+          READ TABLE lt_files INDEX 1 INTO ls_file.
+          IF sy-subrc = 0.
+            cv_path = ls_file-filename.
+          ENDIF.
+        ENDIF.
+
+      CATCH cx_root.
+        MESSAGE e398(00) WITH 'File dialog could not be opened.'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD validate_select_options.
+
+    FIELD-SYMBOLS:
+      <ls_pernr> LIKE LINE OF s_pernr.
+
+    LOOP AT s_pernr ASSIGNING <ls_pernr>.
+
+      "Exclude condition is blocked because deletion input must be explicit.
+      IF <ls_pernr>-sign = 'E'.
+        MESSAGE e398(00) WITH 'Exclude (E) is not allowed for PERNR input.'.
+      ENDIF.
+
+      "Only direct single PERNR values are allowed. Ranges are intentionally rejected.
+      IF <ls_pernr>-option <> 'EQ'
+      OR <ls_pernr>-high IS NOT INITIAL.
+        MESSAGE e398(00) WITH 'Only single PERNR values are allowed (no ranges).'.
+      ENDIF.
+
+      "Blank PERNR input is not meaningful for PA30 processing.
+      IF <ls_pernr>-low IS INITIAL.
+        MESSAGE e398(00) WITH 'PERNR value cannot be blank.'.
+      ENDIF.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+  METHOD validate_execution_request.
+
+    "Run hard validations only when user presses Execute.
+    "This avoids blocking F4 help, radio button changes, and screen refresh events.
+    IF sy-ucomm <> 'ONLI'.
+      RETURN.
+    ENDIF.
+
+    IF p_so = abap_true.
+
+      "When manual PERNR input is selected, at least one PERNR must be entered.
+      IF s_pernr[] IS INITIAL.
+        MESSAGE e398(00) WITH 'Enter at least one PERNR in the select-option.'.
+      ENDIF.
+
+      "Manual PERNR input and file upload are mutually exclusive.
+      IF p_path IS NOT INITIAL.
+        MESSAGE e398(00) WITH 'Provide either PERNRs OR file path, not both.'.
+      ENDIF.
+
+    ELSEIF p_file = abap_true.
+
+      "When file input is selected, file path is mandatory.
+      IF p_path IS INITIAL.
+        MESSAGE e398(00) WITH 'Please provide TXT/CSV file path to upload.'.
+      ENDIF.
+
+      "Manual PERNR input and file upload are mutually exclusive.
+      IF s_pernr[] IS NOT INITIAL.
+        MESSAGE e398(00) WITH 'Provide either PERNRs OR file path, not both.'.
+      ENDIF.
+
+      "Validate file before processing starts.
+      validate_file( p_path ).
+
+    ELSE.
+
+      "Defensive validation in case neither radio button is selected.
+      MESSAGE e398(00) WITH 'Select an input method: PERNR or File upload.'.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD run.
+
+    DATA:
+      lv_pernr TYPE pernr_d.
+
+    check_execution_authority( ).
+
+    CLEAR mt_pernr.
+
+    "Build final unique PERNR list based on selected input method.
+    IF p_so = abap_true.
+      build_pernr_from_selectopt(
+        CHANGING
+          ct_pernr = mt_pernr ).
+    ELSE.
+      build_pernr_from_file(
+        EXPORTING
+          iv_path  = p_path
+        CHANGING
+          ct_pernr = mt_pernr ).
+    ENDIF.
+
+    "Stop processing when no valid PERNR was collected.
+    IF mt_pernr IS INITIAL.
+      MESSAGE e398(00) WITH 'No PERNRs found to process.'.
+    ENDIF.
+
+    "Process each unique PERNR separately to isolate success/error logging.
+    LOOP AT mt_pernr INTO lv_pernr.
+      process_pernr( lv_pernr ).
+    ENDLOOP.
+
+    display_log( ).
+
+  ENDMETHOD.
+
+  METHOD build_pernr_from_selectopt.
+
+    FIELD-SYMBOLS:
+      <ls_pernr> LIKE LINE OF s_pernr.
+
+    DATA:
+      lv_pernr TYPE pernr_d.
+
+    LOOP AT s_pernr ASSIGNING <ls_pernr>.
+
+      lv_pernr = <ls_pernr>-low.
+
+      "Normalize PERNR to internal SAP format before inserting.
+      normalize_pernr(
+        CHANGING
+          cv_pernr = lv_pernr ).
+
+      "Sorted table with unique key prevents duplicate PERNR processing.
+      INSERT lv_pernr INTO TABLE ct_pernr.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+  METHOD build_pernr_from_file.
+
+    "File format rule:
+    "One PERNR per line.
+    "No header.
+    "No token splitting.
+    "Only TXT/CSV plain text input is accepted.
+    read_txt_file(
+      EXPORTING
+        iv_path  = iv_path
+      CHANGING
+        ct_pernr = ct_pernr ).
+
+  ENDMETHOD.
+
+  METHOD read_txt_file.
+
+    DATA:
+      lt_lines TYPE STANDARD TABLE OF string WITH EMPTY KEY,
+      lv_line  TYPE string,
+      lv_pernr TYPE pernr_d.
+
+    "Upload frontend file content into internal string table.
+    cl_gui_frontend_services=>gui_upload(
+      EXPORTING
+        filename = CONV string( iv_path )
+        filetype = 'ASC'
+      CHANGING
+        data_tab = lt_lines
+      EXCEPTIONS
+        OTHERS   = 1 ).
+
+    IF sy-subrc <> 0.
+      MESSAGE e398(00) WITH 'Unable to upload file:' iv_path.
+    ENDIF.
+
+    LOOP AT lt_lines INTO lv_line.
+
+      "Remove leading/trailing spaces and compress extra spaces.
+      CONDENSE lv_line.
+
+      "Ignore blank lines to allow small formatting gaps in file.
+      IF lv_line IS INITIAL.
+        CONTINUE.
+      ENDIF.
+
+      "Reject header/text/special characters.
+      "Only numeric PERNR values are accepted.
+      IF lv_line CN '0123456789'.
+        MESSAGE e398(00) WITH |Invalid Personnel Number in file : { lv_line }|.
+      ENDIF.
+
+      lv_pernr = lv_line.
+
+      "Convert external PERNR format to SAP internal ALPHA format.
+      normalize_pernr(
+        CHANGING
+          cv_pernr = lv_pernr ).
+
+      INSERT lv_pernr INTO TABLE ct_pernr.
+
+    ENDLOOP.
+
+  ENDMETHOD.
+
+  METHOD normalize_pernr.
+
+    "PERNR uses ALPHA conversion in many SAP HCM systems.
+    "Example: external 123 becomes internal 00000123 depending on PERNR length.
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = cv_pernr
+      IMPORTING
+        output = cv_pernr.
+
+  ENDMETHOD.
+
+  METHOD process_pernr.
+
+    DATA:
+      ls_ctu  TYPE ctu_params,
+      lv_err  TYPE abap_bool,
+      lv_text TYPE string.
+
+    FIELD-SYMBOLS:
+      <ls_msg> LIKE LINE OF mt_msg.
+
+    CLEAR:
+      mt_bdcdata,
+      mt_msg.
+
+    "Prepare PA30 BDC recording data for current PERNR.
+    build_bdcdata(
+      EXPORTING
+        iv_pernr   = iv_pernr
+      CHANGING
+        ct_bdcdata = mt_bdcdata ).
+
+    "In test mode, do not call PA30. Only log what would have happened.
+    IF p_test = abap_true.
+      add_log(
+        iv_pernr = iv_pernr
+        iv_stat  = 'Test'
+        iv_msg   = 'TEST MODE: No deletion executed.' ).
+      RETURN.
+    ENDIF.
+
+    CLEAR ls_ctu.
+
+    "Use user-selected BDC display mode.
+    ls_ctu-dismode = p_mode.
+
+    "Synchronous update ensures result is available immediately after CALL TRANSACTION.
+    ls_ctu-updmode = 'S'.
+
+    "Default screen size reduces dynpro layout issues during BDC execution.
+    ls_ctu-defsize = 'X'.
+
+    CALL TRANSACTION 'PA30'
+      USING mt_bdcdata
+      OPTIONS FROM ls_ctu
+      MESSAGES INTO mt_msg.
+
+    CLEAR:
+      lv_err,
+      lv_text.
+
+    "If any critical message is returned, treat the PERNR as failed.
+    LOOP AT mt_msg ASSIGNING <ls_msg>.
+
+      IF <ls_msg>-msgtyp = 'E'
+      OR <ls_msg>-msgtyp = 'A'
+      OR <ls_msg>-msgtyp = 'X'.
+
+        lv_err = abap_true.
+
+        MESSAGE ID <ls_msg>-msgid
+          TYPE <ls_msg>-msgtyp
+          NUMBER <ls_msg>-msgnr
+          WITH <ls_msg>-msgv1
+               <ls_msg>-msgv2
+               <ls_msg>-msgv3
+               <ls_msg>-msgv4
+          INTO lv_text.
+
+        EXIT.
+
+      ENDIF.
+
+    ENDLOOP.
+
+    IF lv_err = abap_true.
+
+      "Fallback text is used only when SAP message text could not be resolved.
+      IF lv_text IS INITIAL.
+        lv_text = 'BDC failed with error (no text returned).'.
+      ENDIF.
+
+      add_log(
+        iv_pernr = iv_pernr
+        iv_stat  = 'Error'
+        iv_msg   = lv_text ).
+
+    ELSE.
+
+      "Capture all success messages returned by PA30.
+      LOOP AT mt_msg ASSIGNING <ls_msg> WHERE msgtyp = 'S'.
+
+        MESSAGE ID <ls_msg>-msgid
+          TYPE <ls_msg>-msgtyp
+          NUMBER <ls_msg>-msgnr
+          WITH <ls_msg>-msgv1
+               <ls_msg>-msgv2
+               <ls_msg>-msgv3
+               <ls_msg>-msgv4
+          INTO lv_text.
+
+        add_log(
+          iv_pernr = iv_pernr
+          iv_stat  = 'Success'
+          iv_msg   = lv_text ).
+
+      ENDLOOP.
+
+      "If PA30 completed without error but returned no success message, log generic success.
+      IF lv_text IS INITIAL.
+
+        lv_text = 'Processed successfully (no success text returned).'.
+
+        add_log(
+          iv_pernr = iv_pernr
+          iv_stat  = 'Success'
+          iv_msg   = lv_text ).
+
+      ENDIF.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD build_bdcdata.
+
+    "Important:
+    "This method intentionally keeps the original SHDB recording sequence unchanged.
+    "Changing screen order, OK codes, or field names can break BDC behavior.
+
+    bdc_dynpro(
+      EXPORTING
+        iv_prog    = 'SAPMP50A'
+        iv_dyn     = '1000'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'BDC_CURSOR'
+        iv_fval    = 'RP50G-PERNR'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'BDC_OKCODE'
+        iv_fval    = '/00'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'RP50G-PERNR'
+        iv_fval    = iv_pernr
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'RP50G-TIMR6'
+        iv_fval    = 'X'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_dynpro(
+      EXPORTING
+        iv_prog    = 'SAPMP50A'
+        iv_dyn     = '1000'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'BDC_CURSOR'
+        iv_fval    = 'RP50G-PERNR'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'BDC_OKCODE'
+        iv_fval    = '=PU00'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'RP50G-PERNR'
+        iv_fval    = iv_pernr
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'RP50G-TIMR6'
+        iv_fval    = 'X'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    "BOC PGAURAV 16-June-26 : TR-S4DK987036 : To Fix S4P Pop-up issue
+    IF sy-sysid = 'S4P'.
+
+      bdc_dynpro(
+        EXPORTING
+          iv_prog    = 'SAPLSPO1'
+          iv_dyn     = '0500'
+        CHANGING
+          ct_bdcdata = ct_bdcdata ).
+
+      bdc_field(
+        EXPORTING
+          iv_fnam    = 'BDC_OKCODE'
+          iv_fval    = '=OPT1'
+        CHANGING
+          ct_bdcdata = ct_bdcdata ).
+
+    ENDIF.
+    "EOC PGAURAV 16-June-26 : TR-S4DK987036 : To Fix S4P Pop-up issue
+
+    bdc_dynpro(
+      EXPORTING
+        iv_prog    = 'SAPMP50D'
+        iv_dyn     = '1000'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'BDC_CURSOR'
+        iv_fval    = 'RP50M-PAGEA'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'BDC_OKCODE'
+        iv_fval    = '=MARK'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'RP50M-PAGEA'
+        iv_fval    = '1'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_dynpro(
+      EXPORTING
+        iv_prog    = 'SAPMP50D'
+        iv_dyn     = '1000'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'BDC_CURSOR'
+        iv_fval    = 'RP50M-PAGEA'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'BDC_OKCODE'
+        iv_fval    = '=DEL'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'RP50M-PAGEA'
+        iv_fval    = '1'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_dynpro(
+      EXPORTING
+        iv_prog    = 'SAPLSPO1'
+        iv_dyn     = '0500'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'BDC_OKCODE'
+        iv_fval    = '=OPT1'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_dynpro(
+      EXPORTING
+        iv_prog    = 'SAPMP50A'
+        iv_dyn     = '1000'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'BDC_OKCODE'
+        iv_fval    = '/EBCK'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+    bdc_field(
+      EXPORTING
+        iv_fnam    = 'BDC_CURSOR'
+        iv_fval    = 'RP50G-PERNR'
+      CHANGING
+        ct_bdcdata = ct_bdcdata ).
+
+  ENDMETHOD.
+
+  METHOD bdc_dynpro.
+
+    "BDC screen marker entry.
+    "DYNBEGIN = 'X' tells SAP this row starts a new dynpro.
+    APPEND VALUE bdcdata(
+      program  = iv_prog
+      dynpro   = iv_dyn
+      dynbegin = abap_true ) TO ct_bdcdata.
+
+  ENDMETHOD.
+
+  METHOD bdc_field.
+
+    DATA:
+      lv_val TYPE bdcdata-fval.
+
+    "Convert any incoming field value to BDC character field format.
+    lv_val = iv_fval.
+
+    "BDC field entry containing screen field name and value.
+    APPEND VALUE bdcdata(
+      fnam = iv_fnam
+      fval = lv_val ) TO ct_bdcdata.
+
+  ENDMETHOD.
+
+  METHOD add_log.
+
+    "Add one processing result row for final ALV display.
+    APPEND VALUE ty_log(
+      pernr   = iv_pernr
+      status  = iv_stat
+      message = iv_msg
+      tcode   = 'PA30'
+      uname   = sy-uname
+      datum   = sy-datum
+      uzeit   = sy-uzeit ) TO mt_log.
+
+  ENDMETHOD.
+
+  METHOD display_log.
+
+    DATA:
+      lo_alv  TYPE REF TO cl_salv_table,
+      lo_cols TYPE REF TO cl_salv_columns_table,
+      lo_col  TYPE REF TO cl_salv_column,
+      ls_log  TYPE ty_log.
+
+    TRY.
+
+        "Create SALV output for processing log.
+        cl_salv_table=>factory(
+          IMPORTING
+            r_salv_table = lo_alv
+          CHANGING
+            t_table      = mt_log ).
+
+        "Enable standard ALV functions such as sort, filter, export, etc.
+        lo_alv->get_functions( )->set_all( abap_true ).
+
+        "Optimize column width for better readability.
+        lo_cols = lo_alv->get_columns( ).
+        lo_cols->set_optimize( abap_true ).
+
+        "Set developer-friendly column texts.
+        lo_col = lo_cols->get_column( 'PERNR' ).
+        lo_col->set_medium_text( 'Personnel Number' ).
+
+        lo_col = lo_cols->get_column( 'STATUS' ).
+        lo_col->set_medium_text( 'Status' ).
+
+        lo_col = lo_cols->get_column( 'MESSAGE' ).
+        lo_col->set_medium_text( 'Message Text' ).
+
+        lo_alv->display( ).
+
+      CATCH cx_salv_not_found.
+
+        "Column text customization failed.
+        "Ignore because ALV can still display with default column texts.
+
+      CATCH cx_salv_msg.
+
+        "Fallback list output if SALV creation/display fails.
+        LOOP AT mt_log INTO ls_log.
+          WRITE: / ls_log-pernr,
+                   ls_log-status,
+                   ls_log-message.
+        ENDLOOP.
+
+    ENDTRY.
+
+  ENDMETHOD.
+
+  METHOD validate_file.
+
+    DATA:
+      lv_path_lc    TYPE string,
+      lv_file_exist TYPE abap_bool.
+
+    lv_path_lc = iv_path.
+    TRANSLATE lv_path_lc TO LOWER CASE.
+
+    "Frontend upload cannot work in background processing.
+    IF sy-batch = abap_true.
+      MESSAGE e398(00) WITH 'Frontend file upload is not supported in background. Run in dialog.'.
+    ENDIF.
+
+    "Only plain text formats are allowed for predictable line-by-line PERNR reading.
+    IF lv_path_lc CP '*.txt'
+    OR lv_path_lc CP '*.csv'.
+      "Allowed extension.
+    ELSE.
+      MESSAGE e398(00) WITH 'Only .txt or .csv file types are allowed. Save Excel as CSV/TXT (no header).'.
+    ENDIF.
+
+    TRY.
+
+        "Check whether selected frontend file physically exists.
+        cl_gui_frontend_services=>file_exist(
+          EXPORTING
+            file   = CONV string( iv_path )
+          RECEIVING
+            result = lv_file_exist ).
+
+      CATCH cx_root.
+        MESSAGE e398(00) WITH 'Unable to validate file on frontend. Check path.'.
+    ENDTRY.
+
+    IF lv_file_exist = abap_false.
+      MESSAGE e398(00) WITH 'File does not exist:' iv_path.
+    ENDIF.
+
+  ENDMETHOD.
+
+ENDCLASS.
+
+"======================================================================
+" Global Application Object
+"======================================================================
+
+DATA:
+  go_app TYPE REF TO lcl_pa30_bulk_delete.
+
+"======================================================================
+" Report Events
+"======================================================================
+
+INITIALIZATION.
+
+  "Create application object once and perform initial authorization check.
+  CREATE OBJECT go_app.
+  go_app->check_initial_authority( ).
+
+AT SELECTION-SCREEN OUTPUT.
+
+  "Refresh selection-screen field enablement based on selected radio button.
+  go_app->handle_selection_screen_output( ).
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_path.
+
+  "Open file browser for selecting TXT/CSV file.
+  go_app->handle_file_f4(
+    CHANGING
+      cv_path = p_path ).
+
+AT SELECTION-SCREEN ON s_pernr.
+
+  "Validate entered select-option PERNR values.
+  go_app->validate_select_options( ).
+
+AT SELECTION-SCREEN.
+
+  "Validate complete input only during Execute action.
+  go_app->validate_execution_request( ).
+
+START-OF-SELECTION.
+
+  "Start actual PERNR processing.
+  go_app->run( ).
