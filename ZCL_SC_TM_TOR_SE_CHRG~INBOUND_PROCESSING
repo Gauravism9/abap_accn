@@ -1,0 +1,450 @@
+Class:  ZCL_SC_TM_TOR_SE_CHRG
+Method: /SCMTMS/TOR_IF_SE_TOR_CHRG~INBOUND_PROCESSING
+
+
+*&---------------------------------------------------------------------*
+*& Enhancement Implementation - ZSC_TM_E1_TOR_CHRG                     *
+*&---------------------------------------------------------------------*
+*& BADI       : /SCMTMS/TOR_SE_TOR_CHRG                                *
+*& Interface  : /SCMTMS/TOR_IF_SE_TOR_CHRG                             *
+*& Class      : ZCL_SC_TM_TOR_SE_CHRG                                  *
+*&---------------------------------------------------------------------*
+*& NOTE :                                                               *
+*& There were multiple CAB CR's Raised during EDI Implementation for   *
+*& Porcess refinement of Acruals and Invoice Postings                  *
+*&   1. CAB CR - CHG                                                   *
+*&   2. CAB CR - CHG                                                   *
+*&   3. CAB CR - CHG                                                   *
+*& After all the above customizations, the entire process has been     *
+*& redefined as per the final version of the signed requirementdocument*
+*& against CR : CHG. Hence the version number is set to 'V001'.        *
+*&---------------------------------------------------------------------*
+*& MODIFICATION LOG:                                                   *
+*&---------------------------------------------------------------------*
+*& VERSION |   TR NO.   |DATE(DD.MM.YYYY)|  DEVLOPER   |   RITM/INC    *
+*&---------------------------------------------------------------------*
+*&  V001   | S4DK983607 |   16.04.2026   |   KROSHAN   | RITM4022621   *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+METHOD /scmtms/tor_if_se_tor_chrg~inbound_processing.
+*..... TYPE DECLERATION
+  TYPES: BEGIN OF lty_party,
+           party_internal_id TYPE bu_id_number,
+           bp_id             TYPE bu_partner,
+           party_uuid        TYPE /scmtms/bupauuid,
+         END OF lty_party.
+
+*..... DATA DECLERATION
+  DATA: lv_rate_type                TYPE kurst_curr,
+        lv_from_curr                TYPE fcurr_curr,
+        lv_to_currency              TYPE tcurr_curr,
+        lv_date                     TYPE datum,
+        lv_datum                    TYPE char10,
+        lv_timlo                    TYPE char10,
+        lv_timestamp                TYPE char15,
+        lv_skip_line_nr_mapping     TYPE boolean,
+        lv_different_currency_flag  TYPE flag,
+        lv_torid                    TYPE /scmtms/d_torrot-tor_id,
+        lv_flag_set                 TYPE flag,   "++ CSUMAN 26/08/2026
+        lr_timestamp                TYPE RANGE OF /bobf/datetime_cr,
+        ls_party                    TYPE lty_party,
+        ls_recipient_party          TYPE LINE OF /scmtms/cpx_t_bdm_hdr_party,
+        ls_ctx                      TYPE /scmtms/cl_tcc_do_helper=>ts_ctx,
+        ls_exchange_rate            TYPE bapi1093_0,
+        ls_exchange_rate_doccur_eur TYPE bapi1093_0,
+        ls_exchange_rate_frmcur_eur TYPE bapi1093_0,
+        ls_return                   TYPE bapiret1,
+        ls_invoice010_cost          TYPE ytm_s_invoice010_cost,
+        lt_charge                   TYPE /scmtms/cpx_tocrq_it_tab,
+        lt_party                    TYPE TABLE OF lty_party.
+
+*..... CLEAR VARIABLES
+  CLEAR: gv_fsd_posting_flag,
+         gv_different_currency_posting,
+         gv_tor_id,
+         gv_invoice010_ok2pay_text,
+         gt_invoice010_cost,
+         gt_tor_key,
+         gt_settlement_index,
+         lv_rate_type,
+         lv_from_curr,
+         lv_to_currency,
+         lv_date,
+         lv_datum,
+         lv_timlo,
+         lv_timestamp,
+         lv_skip_line_nr_mapping,
+         lv_different_currency_flag,
+         lv_torid,
+         lr_timestamp,
+         ls_party,
+         ls_recipient_party,
+         ls_ctx,
+         ls_exchange_rate,
+         ls_exchange_rate_doccur_eur,
+         ls_exchange_rate_frmcur_eur,
+         ls_return,
+         lt_charge,
+         lt_party.
+
+*..... FLAG TO INDICATE INVOICE POSTING
+  IF out-message_header-recipient_business_system_id = 'POLYVANTISINV'.
+    gv_fsd_posting_flag = abap_true.
+  ENDIF.
+*..... FILL THE SEGMENT FOR FO NUMBER IF NOT PRESENT AND THE SHIPMENT ID IS PRESENT
+  IF out-transportation_order-base_btd_reference-id-content = 'NULL' OR
+     out-transportation_order-base_btd_reference-id-content IS INITIAL.
+    LOOP AT out-transportation_order-transportation_charge-charge_item ASSIGNING FIELD-SYMBOL(<fs_item>).
+      LOOP AT <fs_item>-charge_element ASSIGNING FIELD-SYMBOL(<fs_item_charge_elem_line>) WHERE text_collection IS NOT INITIAL.
+*..... GET THE SHIPMENT ID IS PRESENT IN TEXT COLLECTION
+        LOOP AT <fs_item_charge_elem_line>-text_collection-text  ASSIGNING FIELD-SYMBOL(<fs_text_cont>) WHERE type_code-content = 'ZTM20'.
+*..... GET THE RANGE FOR WHICH THE SHIPMET ID'S TO BE VALIDATED
+          APPEND INITIAL LINE TO lr_timestamp ASSIGNING FIELD-SYMBOL(<lfs_timestamp>).
+          <lfs_timestamp>-sign = 'I'.
+          <lfs_timestamp>-option = 'BT'.
+          lv_datum = sy-datum - 70. "NO OF DAYS FOR WHICH THE DATA MUST BE FETCHED
+          lv_timlo = '000000'.
+          CONCATENATE  lv_datum lv_timlo INTO lv_timestamp.
+          <lfs_timestamp>-low = lv_timestamp .
+          lv_datum = sy-datum.
+          lv_timlo = sy-timlo.
+          CONCATENATE  lv_datum lv_timlo INTO lv_timestamp .
+          <lfs_timestamp>-high = lv_timestamp .
+*..... GET THE SHIPMENT TEXT &ITS CORRESPONDING TEXT CONTENTS FOR THE RANGE
+          SELECT * FROM /bobf/d_txctxt INTO TABLE @DATA(lt_ztm20_txctxt) WHERE text_type = 'ZTM20' AND datetime_cr IN @lr_timestamp. "#EC CI_NOFIELD
+          IF sy-subrc = 0.
+            SELECT * FROM /bobf/d_txccon           "#EC CI_NO_TRANSFORM
+               FOR ALL ENTRIES IN @lt_ztm20_txctxt
+             WHERE root_key = @lt_ztm20_txctxt-parent_key INTO TABLE @DATA(lt_ztm20_txccont) . "#EC CI_NOFIELD
+            IF sy-subrc = 0.
+*..... VALIDATE THE SHIPMENT TEXT
+              READ TABLE lt_ztm20_txccont INTO DATA(ls_ztm20_txccont) WITH KEY text = <fs_text_cont>-content_text-content.
+              IF sy-subrc = 0.
+                READ TABLE lt_ztm20_txctxt INTO DATA(ls_ztm20_txctxt) WITH KEY parent_key = ls_ztm20_txccont-root_key.
+                IF sy-subrc = 0.
+*..... GET THE SHIPMENT TEXTS CORRESPONDING TOR ROOT NODE
+                  SELECT SINGLE * FROM /bobf/d_txcroot INTO @DATA(ls_ztm20_txcroot) WHERE db_key = @ls_ztm20_txctxt-parent_key. "#EC CI_ALL_FIELDS_NEEDED
+                  IF sy-subrc = 0.
+                    SELECT SINGLE * FROM /scmtms/d_torrot INTO @DATA(ls_ztm20_torroot) WHERE db_key = @ls_ztm20_txcroot-host_key. "#EC CI_ALL_FIELDS_NEEDED
+                    IF sy-subrc = 0.
+*..... GET THE TOR ID FROM ITS CORRESPONDING TOR ROOT NODE
+                      out-transportation_order-base_btd_reference-id-content = |{ ls_ztm20_torroot-tor_id ALPHA = IN }|.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+      ENDLOOP.
+    ENDLOOP.
+  ENDIF.
+*..... MAP THE BP UUID FOR THE PARTY
+  LOOP AT out-transportation_order-transportation_charge-charge_item ASSIGNING <fs_item>.
+    SELECT SINGLE businesspartner FROM i_bptranspstdcarralphacode INTO @DATA(lv_partner) WHERE bpidentificationnumber = @<fs_item>-party-internal_id-content.
+    IF sy-subrc EQ 0.
+      READ TABLE lt_party TRANSPORTING NO FIELDS WITH KEY bp_id = lv_partner.
+      IF sy-subrc <> 0.
+        ls_party-party_internal_id = <fs_item>-party-internal_id-content.
+        ls_party-bp_id = lv_partner.
+        CALL FUNCTION 'CONVERSION_EXIT_ID001_INPUT'
+          EXPORTING
+            input  = lv_partner
+          IMPORTING
+            output = ls_party-party_uuid.
+        APPEND ls_party TO lt_party.
+      ENDIF.
+      <fs_item>-party-internal_id-content = lv_partner.
+    ENDIF.
+  ENDLOOP.
+*..... MAP THE BP AGAINST THE INFO TYPE CODE
+  lv_torid = |{ out-transportation_order-base_btd_reference-id-content ALPHA = IN }|.
+  SELECT SINGLE purch_org_id FROM /scmtms/d_torrot INTO @DATA(lv_purch_id) WHERE tor_id = @lv_torid.
+  IF sy-subrc EQ 0.
+    SELECT SINGLE db_key FROM /scmtms/d_torrot INTO @DATA(lv_key) WHERE tor_id = @lv_torid.
+    IF sy-subrc EQ 0.
+      gt_tor_key = VALUE #( ( key = lv_key ) ).
+      gv_tor_id  = lv_torid.
+      SELECT SINGLE sobid FROM hrp1001 INTO @DATA(lv_sobid) WHERE objid = @lv_purch_id
+                                                              AND sclas = 'BP'.
+      IF sy-subrc = 0.
+        out-message_header-sender_party-internal_id-content = lv_sobid.
+        APPEND INITIAL LINE TO out-message_header-recipient_party ASSIGNING FIELD-SYMBOL(<fs_recipient>).
+        IF <fs_recipient> IS ASSIGNED.
+          <fs_recipient>-internal_id-content = lv_sobid.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+*..... RETRIVE THE CHARGES PRESENT IN THE DOCUMENT FOR PROCESSING
+  ls_ctx-host_bo_key          = /scmtms/if_tor_c=>sc_bo_key.
+  ls_ctx-host_root_node_key   = /scmtms/if_tor_c=>sc_node-root.
+  ls_ctx-host_node_key        = /scmtms/if_tor_c=>sc_node-transportcharges.
+  CALL METHOD /scmtms/cl_tcc_do_helper=>retrive_do_nodes
+    EXPORTING
+      iv_aggr_charges_cca = abap_false
+      is_ctx              = ls_ctx
+      it_root_key         = VALUE #( ( key = lv_key ) )
+      iv_before_image     = abap_false
+      iv_filter_chrg_el   = abap_false
+    IMPORTING
+      et_do_root          = DATA(lt_bo_chrg_root)
+      et_charge_element   = DATA(lt_bo_chrg_element)
+      et_charge_item      = DATA(lt_bo_chrg_item)
+      et_ice_calc_basis   = DATA(lt_bo_chrg_ele_calc_basis).
+*  IF lt_bo_chrg_element IS NOT INITIAL. " Removing this check as Chagre Elements must be posted for new entries along with respective conversions
+  LOOP AT lt_party INTO ls_party.
+    LOOP AT out-transportation_order-transportation_charge-charge_item ASSIGNING FIELD-SYMBOL(<lfs_charge>) WHERE party-internal_id-content = ls_party-bp_id.
+      LOOP AT <lfs_charge>-charge_element ASSIGNING FIELD-SYMBOL(<fs_charge_element>).
+*..... UPDATE THE CHANGES TO CORRESPODING PARTY IN FO/FB
+        lv_skip_line_nr_mapping = abap_false.
+        LOOP AT lt_bo_chrg_item INTO DATA(ls_bo_charge_item) WHERE party_uuid = ls_party-party_uuid.
+          READ TABLE lt_bo_chrg_element INTO DATA(ls_bo_charge_element) WITH KEY tcet084       = <fs_charge_element>-type_code-content
+                                                                                 parent_key    = ls_bo_charge_item-key
+                                                                                 analyticrelev = abap_false.
+          IF sy-subrc = 0.
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+*.... VALIDATE IF THE CHARGE LINE ITEM IS PREVIOUSLY INVOICED
+        IF ls_bo_charge_element IS NOT INITIAL.
+          IF gv_fsd_posting_flag = abap_true.
+            SELECT SINGLE * FROM /bobf/d_txcroot INTO @DATA(ls_txcroot) WHERE text_schema_id = 'TCM_ICE' AND "#EC CI_ALL_FIELDS_NEEDED
+                                                                              host_key       = @ls_bo_charge_element-key. "#EC CI_NOFIELD
+            IF sy-subrc = 0.
+              SELECT SINGLE * FROM /bobf/d_txctxt INTO @DATA(ls_txctxt) WHERE parent_key = @ls_txcroot-db_key AND "#EC CI_ALL_FIELDS_NEEDED
+                                                                              text_type  = 'INTNT'. "#EC CI_NOFIELD
+              IF sy-subrc = 0.
+                SELECT SINGLE * FROM /bobf/d_txccon INTO @DATA(ls_txccon) WHERE root_key   = @ls_txctxt-parent_key AND "#EC CI_ALL_FIELDS_NEEDED
+                                                                                parent_key = @ls_txctxt-db_key. "#EC CI_NOFIELD
+                IF sy-subrc = 0.
+                  IF ls_txccon-text CS gc_invoice010_chargeline_text.
+                    <fs_charge_element>-ordinal_number_value = 0. "IF LINE ITEM IS ALREADY INVOICED CREATE A NEW LINE
+                    lv_skip_line_nr_mapping = abap_true.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+*... LOGIC TO MAP NEW LINE NUMBER FOR CASES WHICH REQUIRE CHARGE LINE ITEM TO BE NEWLY ADDED
+          IF lv_skip_line_nr_mapping = abap_false.
+            IF ls_bo_charge_element-linenr > '0'.
+              <fs_charge_element>-ordinal_number_value = ls_bo_charge_element-linenr.
+            ELSEIF ls_bo_charge_element-my_tce_linenr > '0'.
+              <fs_charge_element>-ordinal_number_value = ls_bo_charge_element-my_tce_linenr.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+*... LOGIC TO MAP TEXT TO CHARGE LINE ITEM FOR CASES WHICH IS GETTING INVOICE POSTED
+        IF gv_fsd_posting_flag = abap_true.
+          IF <fs_charge_element> IS ASSIGNED.
+            IF <fs_charge_element>-text_collection-text IS INITIAL.
+              APPEND INITIAL LINE TO <fs_charge_element>-text_collection-text ASSIGNING FIELD-SYMBOL(<lfs_text_collection>).
+              IF <lfs_text_collection> IS INITIAL.
+                <lfs_text_collection>-type_code-content = 'ZTM20'.
+                <lfs_text_collection>-content_text-content = gc_invoice010_chargeline_text.
+              ENDIF.
+            ELSEIF <fs_charge_element>-text_collection-text IS NOT INITIAL.
+              READ TABLE <fs_charge_element>-text_collection-text ASSIGNING <lfs_text_collection> INDEX 1.
+              IF sy-subrc = 0.
+                CONCATENATE gc_invoice010_chargeline_text <lfs_text_collection>-content_text-content INTO <lfs_text_collection>-content_text-content SEPARATED BY space.
+              ENDIF.
+            ENDIF.
+            gv_invoice010_ok2pay_text = <lfs_text_collection>-content_text-content.
+          ENDIF.
+
+          "FLAG IS TO RUN BELOW ONCE FOR MULTIPLE CHARGE ELEMENTS
+          IF lv_flag_set = abap_false.      "++ CSUMAN 26/08/2026
+*... LOGIC TO MAP TEXT TO CHARGE LINE ITEM FOR CASES WHICH IS GETTING INVOICE POSTED
+            APPEND INITIAL LINE TO gt_settlement_index ASSIGNING FIELD-SYMBOL(<lfs_settlement_index>).
+            IF <lfs_settlement_index> IS ASSIGNED.
+              <lfs_settlement_index>-tor_key = ls_bo_charge_item-root_key.
+              <lfs_settlement_index>-host_key = ls_bo_charge_item-host_root_key.
+              <lfs_settlement_index>-invoice_number = '1'.
+              <lfs_settlement_index>-sett_ind_key = ''.
+              <lfs_settlement_index>-bill_from_party = ls_bo_charge_item-party_uuid.
+              <lfs_settlement_index>-invoicing_party = ''.
+              <lfs_settlement_index>-purchase_org_id = ls_bo_charge_item-org_unit_id.
+              <lfs_settlement_index>-payment_terms = ls_bo_charge_item-zterm.
+              <lfs_settlement_index>-calculation_level = ls_bo_charge_item-root_level.
+              <lfs_settlement_index>-currency = <fs_charge_element>-final_amount-currency_code.
+              <lfs_settlement_index>-doc_type = 'ZFS1'.
+              <lfs_settlement_index>-purch_grp_id = ls_bo_charge_item-org_grp_id.
+              <lfs_settlement_index>-purch_company_org_id = ''.
+              lv_flag_set    = abap_true.     "++ CSUMAN 26/08/2026
+            ENDIF.
+          ENDIF.
+        ENDIF.
+*... LOGIC TO GET EXCHANGE RATE AND FINAL VALUE FOR THE CHARGE LINE ITEM
+        READ TABLE lt_bo_chrg_root INTO DATA(ls_bo_chrg_root) WITH KEY root_key = lv_key.
+        IF sy-subrc = 0.
+          IF <fs_charge_element>-final_amount-currency_code <> ls_bo_chrg_root-doc_currency.
+            ls_invoice010_cost-different_curr = <fs_charge_element>-final_amount-currency_code.
+*..... CASE 1 : GET EXCHANGE RATE TO BE CONVERTED DIRECTLY
+            lv_rate_type = 'EURX'.
+            lv_from_curr = ls_bo_chrg_root-doc_currency.
+            lv_to_currency = <fs_charge_element>-final_amount-currency_code.
+            CALL FUNCTION 'BAPI_EXCHANGERATE_GETDETAIL'
+              EXPORTING
+                rate_type  = lv_rate_type
+                from_curr  = lv_from_curr
+                to_currncy = lv_to_currency
+                date       = ls_bo_chrg_root-exchdate_doc
+              IMPORTING
+                exch_rate  = ls_exchange_rate
+                return     = ls_return.
+            IF ls_exchange_rate IS NOT INITIAL AND
+               ls_return        IS INITIAL.
+              gv_different_currency_posting                          = abap_true.
+              <fs_charge_element>-price_component_rate-decimal_value = <fs_charge_element>-final_amount-content.
+              <fs_charge_element>-price_component_rate-currency_code = <fs_charge_element>-final_amount-currency_code.
+              <fs_charge_element>-final_amount-currency_code         = ls_bo_chrg_root-doc_currency.
+              <fs_charge_element>-final_amount-content               = ( <fs_charge_element>-final_amount-content * ls_exchange_rate-exch_rate ).
+              DATA(lv_round)                                         = round( val = <fs_charge_element>-final_amount-content dec = 2 ).
+              <fs_charge_element>-final_amount-content               = lv_round.
+              CONDENSE <fs_charge_element>-price_component_rate-currency_code NO-GAPS.
+              CONDENSE <fs_charge_element>-final_amount-currency_code         NO-GAPS.
+              "FILL DATA FOR FSD POSTING
+              ls_invoice010_cost-bp_id     = ls_party-bp_id.
+              ls_invoice010_cost-bp_uuid   = ls_party-party_uuid.
+              IF ls_bo_charge_element IS INITIAL.
+                ls_invoice010_cost-type_code = ls_bo_charge_element-tcet084.
+              ELSEIF <fs_charge_element> IS ASSIGNED AND
+                     <fs_charge_element>-type_code-content IS NOT INITIAL.
+                ls_invoice010_cost-type_code = <fs_charge_element>-type_code-content.
+              ENDIF.
+              ls_invoice010_cost-from_curr                           = <fs_charge_element>-price_component_rate-currency_code.
+              ls_invoice010_cost-from_amount                         = <fs_charge_element>-price_component_rate-decimal_value.
+              ls_invoice010_cost-to_curr                             = <fs_charge_element>-final_amount-currency_code.
+              ls_invoice010_cost-to_amount                           = <fs_charge_element>-final_amount-content.
+              ls_invoice010_cost-exch_rate                           = ls_exchange_rate-exch_rate .
+              ls_invoice010_cost-type_code                           = <fs_charge_element>-type_code-content.
+              APPEND ls_invoice010_cost TO gt_invoice010_cost.
+            ENDIF.
+            IF ls_return IS NOT INITIAL.
+              CLEAR: ls_exchange_rate, ls_return, lv_rate_type, lv_from_curr, lv_to_currency.
+              lv_rate_type = 'EURX'.
+              lv_from_curr = <fs_charge_element>-final_amount-currency_code.
+              lv_to_currency = ls_bo_chrg_root-doc_currency.
+              CALL FUNCTION 'BAPI_EXCHANGERATE_GETDETAIL'
+                EXPORTING
+                  rate_type  = lv_rate_type
+                  from_curr  = lv_from_curr
+                  to_currncy = lv_to_currency
+                  date       = ls_bo_chrg_root-exchdate_doc
+                IMPORTING
+                  exch_rate  = ls_exchange_rate
+                  return     = ls_return.
+              IF ls_exchange_rate IS NOT INITIAL AND
+                 ls_return        IS INITIAL.
+                gv_different_currency_posting                          = abap_true.
+                <fs_charge_element>-price_component_rate-decimal_value = <fs_charge_element>-final_amount-content.
+                <fs_charge_element>-price_component_rate-currency_code = <fs_charge_element>-final_amount-currency_code.
+                <fs_charge_element>-final_amount-currency_code         = ls_bo_chrg_root-doc_currency.
+                <fs_charge_element>-final_amount-content               = ( <fs_charge_element>-final_amount-content / ls_exchange_rate-exch_rate_v ).
+                lv_round                                               = round( val = <fs_charge_element>-final_amount-content dec = 2 ).
+                <fs_charge_element>-final_amount-content               = lv_round.
+                CONDENSE <fs_charge_element>-price_component_rate-currency_code NO-GAPS.
+                CONDENSE <fs_charge_element>-final_amount-currency_code         NO-GAPS.
+                "FILL DATA FOR FSD POSTING
+                ls_invoice010_cost-bp_id     = ls_party-bp_id.
+                ls_invoice010_cost-bp_uuid   = ls_party-party_uuid.
+                IF ls_bo_charge_element IS INITIAL.
+                  ls_invoice010_cost-type_code = ls_bo_charge_element-tcet084.
+                ELSEIF <fs_charge_element> IS ASSIGNED AND
+                       <fs_charge_element>-type_code-content IS NOT INITIAL.
+                  ls_invoice010_cost-type_code = <fs_charge_element>-type_code-content.
+                ENDIF.
+                ls_invoice010_cost-from_curr                           = <fs_charge_element>-price_component_rate-currency_code.
+                ls_invoice010_cost-from_amount                         = <fs_charge_element>-price_component_rate-decimal_value.
+                ls_invoice010_cost-to_curr                             = <fs_charge_element>-final_amount-currency_code.
+                ls_invoice010_cost-to_amount                           = <fs_charge_element>-final_amount-content.
+                ls_invoice010_cost-exch_rate                           = ( 1 / ls_exchange_rate-exch_rate_v ).
+                ls_invoice010_cost-type_code                           = <fs_charge_element>-type_code-content.
+                APPEND ls_invoice010_cost TO gt_invoice010_cost.
+              ENDIF.
+            ENDIF.
+*..... CASE 2 : GET EXCHANGE RATE TO BE CONVERTED AGAINST => EURO'S
+            IF ls_return IS NOT INITIAL.
+              CLEAR: ls_exchange_rate, ls_return, lv_rate_type, lv_from_curr, lv_to_currency.
+              lv_rate_type = 'EURX'.
+              lv_from_curr = <fs_charge_element>-final_amount-currency_code.
+              lv_to_currency = 'EUR'.
+              CALL FUNCTION 'BAPI_EXCHANGERATE_GETDETAIL'
+                EXPORTING
+                  rate_type  = lv_rate_type
+                  from_curr  = lv_from_curr
+                  to_currncy = lv_to_currency
+                  date       = ls_bo_chrg_root-exchdate_doc
+                IMPORTING
+                  exch_rate  = ls_exchange_rate_frmcur_eur
+                  return     = ls_return.
+              IF ls_exchange_rate_frmcur_eur IS NOT INITIAL AND
+                 ls_return                   IS INITIAL.
+                CLEAR: ls_exchange_rate, ls_return, lv_rate_type, lv_from_curr, lv_to_currency.
+                lv_rate_type = 'EURX'.
+                lv_from_curr = ls_bo_chrg_root-doc_currency.
+                lv_to_currency = 'EUR'.
+                CALL FUNCTION 'BAPI_EXCHANGERATE_GETDETAIL'
+                  EXPORTING
+                    rate_type  = lv_rate_type
+                    from_curr  = lv_from_curr
+                    to_currncy = lv_to_currency
+                    date       = ls_bo_chrg_root-exchdate_doc
+                  IMPORTING
+                    exch_rate  = ls_exchange_rate_doccur_eur
+                    return     = ls_return.
+                IF ls_exchange_rate_doccur_eur IS NOT INITIAL AND
+                   ls_return                   IS INITIAL.
+                  gv_different_currency_posting                          = abap_true.
+                  <fs_charge_element>-price_component_rate-decimal_value = <fs_charge_element>-final_amount-content.
+                  <fs_charge_element>-price_component_rate-currency_code = <fs_charge_element>-final_amount-currency_code.
+                  <fs_charge_element>-final_amount-currency_code         = ls_bo_chrg_root-doc_currency.
+                  <fs_charge_element>-final_amount-content               = ( <fs_charge_element>-final_amount-content * ls_exchange_rate_frmcur_eur-exch_rate / ls_exchange_rate_doccur_eur-exch_rate ).
+                  lv_round                                               = round( val = <fs_charge_element>-final_amount-content dec = 2 ).
+                  <fs_charge_element>-final_amount-content               = lv_round.
+                  CONDENSE <fs_charge_element>-price_component_rate-currency_code NO-GAPS.
+                  CONDENSE <fs_charge_element>-final_amount-currency_code         NO-GAPS.
+                  "FILL DATA FOR FSD POSTING
+                  ls_invoice010_cost-bp_id     = ls_party-bp_id.
+                  ls_invoice010_cost-bp_uuid   = ls_party-party_uuid.
+                  IF ls_bo_charge_element IS INITIAL.
+                    ls_invoice010_cost-type_code = ls_bo_charge_element-tcet084.
+                  ELSEIF <fs_charge_element> IS ASSIGNED AND
+                         <fs_charge_element>-type_code-content IS NOT INITIAL.
+                    ls_invoice010_cost-type_code = <fs_charge_element>-type_code-content.
+                  ENDIF.
+                  ls_invoice010_cost-from_curr                           = <fs_charge_element>-price_component_rate-currency_code.
+                  ls_invoice010_cost-from_amount                         = <fs_charge_element>-price_component_rate-decimal_value.
+                  ls_invoice010_cost-to_curr                             = <fs_charge_element>-final_amount-currency_code.
+                  ls_invoice010_cost-to_amount                           = <fs_charge_element>-final_amount-content.
+                  ls_invoice010_cost-exch_rate                           = ls_exchange_rate_frmcur_eur-exch_rate / ls_exchange_rate_doccur_eur-exch_rate.
+                  ls_invoice010_cost-type_code                           = <fs_charge_element>-type_code-content.
+                  APPEND ls_invoice010_cost TO gt_invoice010_cost.
+                ENDIF.
+              ENDIF.
+            ENDIF.
+          ELSE.
+*..... CASE 3 : GET EXCHANGE RATE FOR NO CONVERSIONS IN CURRENCY's
+            "FILL DATA FOR FSD POSTING
+            ls_invoice010_cost-bp_id     = ls_party-bp_id.
+            ls_invoice010_cost-bp_uuid   = ls_party-party_uuid.
+            IF ls_bo_charge_element IS INITIAL.
+              ls_invoice010_cost-type_code = ls_bo_charge_element-tcet084.
+            ELSEIF <fs_charge_element> IS ASSIGNED AND
+                   <fs_charge_element>-type_code-content IS NOT INITIAL.
+              ls_invoice010_cost-type_code = <fs_charge_element>-type_code-content.
+            ENDIF.
+            gv_different_currency_posting                          = abap_false.
+            ls_invoice010_cost-from_curr                           = <fs_charge_element>-final_amount-currency_code.
+            ls_invoice010_cost-from_amount                         = <fs_charge_element>-final_amount-content.
+            ls_invoice010_cost-exch_rate                           = '1.00'.
+            ls_invoice010_cost-type_code                           = <fs_charge_element>-type_code-content.
+            APPEND ls_invoice010_cost TO gt_invoice010_cost.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+    ENDLOOP.
+  ENDLOOP.
+*  ENDIF." Removing this check as Chagre Elements must be posted for new entries along with respective conversions
+ENDMETHOD.
