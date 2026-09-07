@@ -1,0 +1,112 @@
+Class: /SCMTMS/CL_TCC_A_CALC_BASE~GET_DOC_CURRENCY
+Post-Exit Enhancement: ZSC_TM_EI_EDI_MODS_1
+
+CLASS lcl_zsc_tm_ei_edi_mods_1 DEFINITION DEFERRED.
+CLASS /scmtms/cl_tcc_a_calc_base DEFINITION LOCAL FRIENDS lcl_zsc_tm_ei_edi_mods_1.
+CLASS lcl_zsc_tm_ei_edi_mods_1 DEFINITION.
+  PUBLIC SECTION.
+    CLASS-DATA obj TYPE REF TO lcl_zsc_tm_ei_edi_mods_1.    "#EC NEEDED
+    DATA core_object TYPE REF TO /scmtms/cl_tcc_a_calc_base . "#EC NEEDED
+ INTERFACES  IPO_ZSC_TM_EI_EDI_MODS_1.
+    METHODS:
+      constructor IMPORTING core_object
+                              TYPE REF TO /scmtms/cl_tcc_a_calc_base OPTIONAL.
+ENDCLASS.
+CLASS lcl_zsc_tm_ei_edi_mods_1 IMPLEMENTATION.
+  METHOD constructor.
+    me->core_object = core_object.
+  ENDMETHOD.
+
+  METHOD ipo_zsc_tm_ei_edi_mods_1~get_doc_currency.
+*"------------------------------------------------------------------------*
+*" Declaration of POST-method, do not insert any comments here please!
+*"
+*"methods GET_DOC_CURRENCY
+*"  importing
+*"    !IT_CHARGE_ITEM type /SCMTMS/T_TCC_CHRGITEM_K
+*"    !IT_ORG_KEY_LINK type /SCMTMS/IF_TCC_PREPROC=>TT_ORG_KEY_LINK
+*"    !IT_BUS_DATA type /SCMTMS/T_TCC_COMM_ROOT
+*"    !IT_ROOT_KEY type /BOBF/T_FRW_KEY
+*"    !IT_CHARGE_ITEM_DO type /SCMTMS/T_TCC_CHRGITEM_K
+*"    !IS_ROOT_KEY type /BOBF/S_FRW_KEY
+*"    !IS_CTX type /BOBF/S_FRW_CTX_ACT
+*"    !IT_CHARGE_ITEM_REF type /SCMTMS/T_TCC_CHRGITEM_K
+*"    !IS_HOST_INFO type ref to /SCMTMS/S_TCC_HOST_CURR optional
+*"  changing
+*"    !EV_TRIGGER_DET type BOOLE_D
+*"    !EV_INVOICE_FIX_CURR type BOOLE_D
+*"    !EV_DOC_CURR type WAERS
+*"    !EV_LCL_CURR type /SCMTMS/LCL_CURRENCY
+*"    !EV_FIX_CURRENCY type BOOLE_D
+*"    !CV_TARIFF_DET type /SCMTMS/CALC_LEVEL .
+*"------------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*& Enhancement Implementation - ZSC_TM_E1_FSD_POST_DIFF_CURR           *
+*&---------------------------------------------------------------------*
+*& Class      : /SCMTMS/CL_TCC_A_CALC_BASE                             *
+*& Method     : GET_DOC_CURRENCY                                       *
+*&---------------------------------------------------------------------*
+*& NOTE :                                                              *
+*& The beow data's are read from Charge Calculation inbound proxy :    *
+*& TransportationOrderChargeElementRequest_In. This data is ensured to *
+*& make sure the below logic is restricted only for EDI processings.   *
+*&---------------------------------------------------------------------*
+*& MODIFICATION LOG:                                                   *
+*&---------------------------------------------------------------------*
+*& VERSION |   TR NO.   |DATE(DD.MM.YYYY)|  DEVLOPER   |   RITM/INC    *
+*&---------------------------------------------------------------------*
+*&  V001   | S4DK983607 |   16.04.2026   |   KROSHAN   | RITM4022621   *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+
+*.... CONSTNAT DECLERATION
+    CONSTANTS : lc_stack_data_1 TYPE char100 VALUE '(SAPLZSC_TM_EWM_TOOLS)GV_FSD_POSTING_FLAG',
+                lc_stack_data_2 TYPE char100 VALUE '(SAPLZSC_TM_EWM_TOOLS)GV_DIFFERENT_CURRENCY_POSTING',
+                lc_stack_data_3 TYPE char100 VALUE '(SAPLZSC_TM_EWM_TOOLS)GT_INVOICE010_COST'.
+
+*.... FIELD SYMBOL DECLERATION
+    FIELD-SYMBOLS: <lfs_fsd_posting_flag>       TYPE any,
+                   <lfs_different_curr_posting> TYPE any,
+                   <lfs_charge_lines>           TYPE any,
+                   <lfs_charge_lines_t>         TYPE ytm_t_invoice010_cost.
+
+*.... CHECK FOR FSD POSTING FLAG
+    ASSIGN (lc_stack_data_1) TO <lfs_fsd_posting_flag>.
+    IF <lfs_fsd_posting_flag> IS ASSIGNED .
+      IF <lfs_fsd_posting_flag> = abap_true. "if Yes proceed
+
+*.... CHECK FOR FSD DIFFERENT CURRENCY POSTING FLAG
+        ASSIGN (lc_stack_data_2) TO <lfs_different_curr_posting>.
+        IF <lfs_different_curr_posting> IS ASSIGNED.
+          IF <lfs_different_curr_posting> = abap_true. "if Yes proceed
+
+*.... GET THE DIFFERENT CURRENCY TO BE POSTED
+            ASSIGN (lc_stack_data_3) TO <lfs_charge_lines>.
+            IF <lfs_charge_lines> IS ASSIGNED.
+              ASSIGN <lfs_charge_lines> TO <lfs_charge_lines_t>.
+              IF <lfs_charge_lines_t> IS ASSIGNED.
+                IF <lfs_charge_lines_t> IS NOT INITIAL. "if Yes proceed
+                  READ TABLE <lfs_charge_lines_t> ASSIGNING FIELD-SYMBOL(<lfs_charge_line>) INDEX 1.
+                  IF sy-subrc = 0.
+                    IF <lfs_charge_line> IS ASSIGNED.
+                      ev_trigger_det      = abap_true.
+                      ev_invoice_fix_curr = abap_true.
+                      ev_fix_currency     = abap_true.
+                      IF ev_doc_curr <> <lfs_charge_line>-from_curr .
+                        ev_doc_curr = <lfs_charge_line>-from_curr.
+                        ev_lcl_curr = <lfs_charge_line>-to_curr.
+                      ELSEIF  ev_doc_curr <> <lfs_charge_line>-to_curr .
+                        ev_doc_curr = <lfs_charge_line>-to_curr.
+                        ev_lcl_curr = <lfs_charge_line>-from_curr.
+                      ENDIF.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
