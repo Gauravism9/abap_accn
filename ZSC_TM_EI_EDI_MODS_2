@@ -1,0 +1,379 @@
+Class: /SCMTMS/CL_TCC_ENGINE_COPY
+Method: /SCMTMS/IF_TCC_CALC_CHARGES~PROCESS_CALCULATION_SHEETS
+Post-Exit Enhancement: ZSC_TM_EI_EDI_MODS_2
+
+CLASS lcl_zsc_tm_ei_edi_mods_2 DEFINITION DEFERRED.
+CLASS /scmtms/cl_tcc_engine_copy DEFINITION LOCAL FRIENDS lcl_zsc_tm_ei_edi_mods_2.
+CLASS lcl_zsc_tm_ei_edi_mods_2 DEFINITION.
+  PUBLIC SECTION.
+    CLASS-DATA obj TYPE REF TO lcl_zsc_tm_ei_edi_mods_2.    "#EC NEEDED
+    DATA core_object TYPE REF TO /scmtms/cl_tcc_engine_copy . "#EC NEEDED
+ INTERFACES  IPO_ZSC_TM_EI_EDI_MODS_2.
+    METHODS:
+      constructor IMPORTING core_object
+                              TYPE REF TO /scmtms/cl_tcc_engine_copy OPTIONAL.
+ENDCLASS.
+CLASS lcl_zsc_tm_ei_edi_mods_2 IMPLEMENTATION.
+  METHOD constructor.
+    me->core_object = core_object.
+  ENDMETHOD.
+
+  METHOD ipo_zsc_tm_ei_edi_mods_2~process_calculation_sheets.
+*"------------------------------------------------------------------------*
+*" Declaration of POST-method, do not insert any comments here please!
+*"
+*"methods PROCESS_CALCULATION_SHEETS
+*"  importing
+*"    !IS_REQUEST type /SCMTMS/IF_TCC_ENGINE=>TY_REQUEST
+*"    !IV_NO_RECALC type BOOLEAN
+*"    !IT_RES_CALC_SHEET type /SCMTMS/IF_TCC_ENGINE=>TT_RESOLVED_CALC_SHEET
+*"  changing
+*"    !ET_RESPONSE type /SCMTMS/IF_TCC_ENGINE=>TT_RESPONSE .
+*"------------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*& Enhancement Implementation - ZSC_TM_EI_EDI_MODS_2                   *
+*&---------------------------------------------------------------------*
+*& Class      : /SCMTMS/CL_TCC_ENGINE_COPY                             *
+*& Method     : /SCMTMS/IF_TCC_CALC_CHARGES~RESOLVE_CALCULATION_SHEETS *
+*&---------------------------------------------------------------------*
+*& NOTE :                                                              *
+*& The beow data's are read from Charge Calculation inbound proxy :    *
+*& TransportationOrderChargeElementRequest_In. This data is ensured to *
+*& make sure the below logic is restricted only for EDI processings    *
+*&---------------------------------------------------------------------*
+*& MODIFICATION LOG:                                                   *
+*&---------------------------------------------------------------------*
+*& VERSION |   TR NO.   |DATE(DD.MM.YYYY)|  DEVLOPER   |   RITM/INC    *
+*&---------------------------------------------------------------------*
+*&  V001   | S4DK983607 |   16.04.2026   |   KROSHAN   | RITM4022621   *
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+
+*.... CONSTNAT DECLERATION
+    CONSTANTS : lc_stack_data_1 TYPE char100 VALUE '(SAPLZSC_TM_EWM_TOOLS)GV_FSD_POSTING_FLAG',
+                lc_stack_data_2 TYPE char100 VALUE '(SAPLZSC_TM_EWM_TOOLS)GT_INVOICE010_COST',
+                lc_stack_data_3 TYPE char100 VALUE '(SAPLZSC_TM_EWM_TOOLS)GV_DIFFERENT_CURRENCY_POSTING'.
+
+*.... DATA DECLERATION
+    DATA: lt_res_calc_sheet_tmp TYPE /scmtms/t_tcc_trchrg_elmnt_com,
+          lv_amount1            TYPE p DECIMALS 4,
+          lv_amount2            TYPE p DECIMALS 4,
+          lv_amount3            TYPE p DECIMALS 4,
+          lv_amount4            TYPE p DECIMALS 4.
+
+*.... FIELD SYMBOL DECLERATION
+    FIELD-SYMBOLS: <lfs_fsd_posting_flag>       TYPE any,
+                   <lfs_different_curr_posting> TYPE any,
+                   <lfs_charge_lines>           TYPE any,
+                   <lfs_charge_lines_t>         TYPE ytm_t_invoice010_cost.
+
+    CLEAR: lt_res_calc_sheet_tmp,
+           lv_amount1,
+           lv_amount2,
+           lv_amount3,
+           lv_amount4.
+
+*.... CHECK FOR FSD POSTING FLAG
+    ASSIGN (lc_stack_data_1) TO <lfs_fsd_posting_flag>.
+    IF <lfs_fsd_posting_flag> IS ASSIGNED .
+      IF <lfs_fsd_posting_flag> = abap_true. "if Yes proceed
+
+*.... GET THE DIFFERENT CURRENCY TO BE POSTED
+        ASSIGN (lc_stack_data_2) TO <lfs_charge_lines>.
+        IF <lfs_charge_lines> IS ASSIGNED.
+          ASSIGN <lfs_charge_lines> TO <lfs_charge_lines_t>.
+          IF <lfs_charge_lines_t> IS ASSIGNED.
+            IF <lfs_charge_lines_t> IS NOT INITIAL. "if Yes proceed
+*.... CHECK FOR FSD DIFFERENT CURRENCY POSTING FLAG
+              ASSIGN (lc_stack_data_3) TO <lfs_different_curr_posting>.
+              IF <lfs_different_curr_posting> IS ASSIGNED.
+                IF et_response IS NOT INITIAL.
+                  READ TABLE et_response ASSIGNING FIELD-SYMBOL(<lfs_resp_calc_sheet>) INDEX 1.
+                  IF sy-subrc = 0.
+                    IF <lfs_resp_calc_sheet> IS ASSIGNED.
+                      IF <lfs_resp_calc_sheet>-charges-chargeelements IS NOT INITIAL.
+                        CLEAR: lt_res_calc_sheet_tmp,
+                               <lfs_resp_calc_sheet>-charges-amount,
+                               <lfs_resp_calc_sheet>-charges-amountlcl,
+                               <lfs_resp_calc_sheet>-charges-amountinv.
+                        "....FILTER ONLY APPLICABLE CHARGES TO BE POSTED
+                        LOOP AT <lfs_charge_lines_t> ASSIGNING FIELD-SYMBOL(<lfs_charge_line>).
+                          IF ( <lfs_charge_line>-from_curr IS NOT INITIAL AND <lfs_charge_line>-from_amount > 0 AND <lfs_charge_line>-to_curr IS INITIAL ).
+                            "....CASE 1
+                            LOOP AT <lfs_resp_calc_sheet>-charges-chargeelements ASSIGNING FIELD-SYMBOL(<lfs_resp_calc_sheet_charge>) WHERE tcet084   = <lfs_charge_line>-type_code
+                                                                                                                                        AND tccs_curr = <lfs_charge_line>-from_curr.
+                              IF <lfs_resp_calc_sheet_charge>-tccs_amount = ( <lfs_charge_line>-from_amount / 10000 ).
+                                APPEND <lfs_resp_calc_sheet_charge> TO lt_res_calc_sheet_tmp.
+
+                                IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-from_curr .
+                                  <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-from_amount / 10000 ).
+                                ENDIF.
+
+                                IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-from_curr .
+                                  <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-from_amount / 10000 ).
+                                ENDIF.
+
+                                IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-from_curr .
+                                  <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-from_amount / 10000 ).
+                                ENDIF.
+                              ENDIF.
+                            ENDLOOP.
+                            IF sy-subrc = 4.
+                              LOOP AT <lfs_resp_calc_sheet>-charges-chargeelements ASSIGNING <lfs_resp_calc_sheet_charge> WHERE tcet084       = <lfs_charge_line>-type_code
+                                                                                                                            AND line_amt_curr = <lfs_charge_line>-from_curr.
+                                IF <lfs_resp_calc_sheet_charge>-line_amt = ( <lfs_charge_line>-from_amount / 10000 ).
+                                  APPEND <lfs_resp_calc_sheet_charge> TO lt_res_calc_sheet_tmp.
+
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-from_curr .
+                                    <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-from_amount / 10000 ).
+                                  ENDIF.
+
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-from_curr .
+                                    <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-from_amount / 10000 ).
+                                  ENDIF.
+
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-from_curr .
+                                    <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-from_amount / 10000 ).
+                                  ENDIF.
+                                ENDIF.
+                              ENDLOOP.
+                            ENDIF.
+                          ELSEIF ( <lfs_charge_line>-to_curr IS NOT INITIAL AND <lfs_charge_line>-to_amount > 0 AND <lfs_charge_line>-from_curr IS INITIAL ).
+                            "....CASE 2
+                            LOOP AT <lfs_resp_calc_sheet>-charges-chargeelements ASSIGNING <lfs_resp_calc_sheet_charge> WHERE tcet084   = <lfs_charge_line>-type_code
+                                                                                                                          AND tccs_curr = <lfs_charge_line>-to_curr.
+                              IF <lfs_resp_calc_sheet_charge>-tccs_amount = ( <lfs_charge_line>-to_amount / 10000 ).
+                                APPEND <lfs_resp_calc_sheet_charge> TO lt_res_calc_sheet_tmp.
+
+                                IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-to_curr .
+                                  <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-to_amount / 10000 ).
+                                ENDIF.
+
+                                IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-to_curr .
+                                  <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-to_amount / 10000 ).
+                                ENDIF.
+
+                                IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-to_curr .
+                                  <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-to_amount / 10000 ).
+                                ENDIF.
+                              ENDIF.
+                            ENDLOOP.
+                            IF sy-subrc = 4.
+                              LOOP AT <lfs_resp_calc_sheet>-charges-chargeelements ASSIGNING <lfs_resp_calc_sheet_charge> WHERE tcet084       = <lfs_charge_line>-type_code
+                                                                                                                            AND line_amt_curr = <lfs_charge_line>-to_curr.
+                                IF <lfs_resp_calc_sheet_charge>-line_amt = ( <lfs_charge_line>-to_amount / 10000 ).
+                                  APPEND <lfs_resp_calc_sheet_charge> TO lt_res_calc_sheet_tmp.
+
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-to_curr .
+                                    <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-to_amount / 10000 ).
+                                  ENDIF.
+
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-to_curr .
+                                    <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-to_amount / 10000 ).
+                                  ENDIF.
+
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-to_curr .
+                                    <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-to_amount / 10000 ).
+                                  ENDIF.
+                                ENDIF.
+                              ENDLOOP.
+                            ENDIF.
+                          ELSEIF ( <lfs_charge_line>-to_curr IS NOT INITIAL AND <lfs_charge_line>-from_amount > 0 AND
+                                   <lfs_charge_line>-from_curr IS NOT INITIAL AND <lfs_charge_line>-to_amount > 0 ).
+                            "....CASE 3
+                            LOOP AT <lfs_resp_calc_sheet>-charges-chargeelements ASSIGNING <lfs_resp_calc_sheet_charge> WHERE tcet084       = <lfs_charge_line>-type_code
+                                                                                                                          AND tccs_curr     = <lfs_charge_line>-from_curr
+                                                                                                                          AND line_amt_curr = <lfs_charge_line>-to_curr.
+                              CLEAR:  lv_amount1, lv_amount2, lv_amount3, lv_amount4.
+                              lv_amount1 = <lfs_resp_calc_sheet_charge>-tccs_amount.
+                              lv_amount2 =  ( <lfs_charge_line>-from_amount / 10000 ).
+                              lv_amount3 =  <lfs_resp_calc_sheet_charge>-line_amt.
+                              lv_amount4 =  ( <lfs_charge_line>-to_amount / 10000 ).
+
+                              IF ( <lfs_resp_calc_sheet_charge>-tccs_amount = ( <lfs_charge_line>-from_amount / 10000 ) AND
+                                   <lfs_resp_calc_sheet_charge>-line_amt    = ( <lfs_charge_line>-to_amount / 10000 ) ) OR
+                                 ( lv_amount1 = lv_amount2 AND lv_amount3 = lv_amount4 ).
+                                APPEND <lfs_resp_calc_sheet_charge> TO lt_res_calc_sheet_tmp.
+
+*                                IF <lfs_different_curr_posting> = abap_false.
+                                IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-to_curr .
+                                  <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-to_amount / 10000 ).
+                                ENDIF.
+
+                                IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-to_curr .
+                                  <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-to_amount / 10000 ).
+                                ENDIF.
+
+                                IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-to_curr .
+                                  <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-to_amount / 10000 ).
+                                ENDIF.
+
+                                IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-from_curr .
+                                  <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-from_amount / 10000 ).
+                                ENDIF.
+
+                                IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-from_curr .
+                                  <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-from_amount / 10000 ).
+                                ENDIF.
+
+                                IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-from_curr .
+                                  <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-from_amount / 10000 ).
+                                ENDIF.
+*                                ENDIF.
+                              ENDIF.
+                            ENDLOOP.
+                            IF sy-subrc = 4.
+                              "....CASE 4
+                              LOOP AT <lfs_resp_calc_sheet>-charges-chargeelements ASSIGNING <lfs_resp_calc_sheet_charge> WHERE tcet084       = <lfs_charge_line>-type_code
+                                                                                                                            AND tccs_curr     = <lfs_charge_line>-to_curr
+                                                                                                                            AND line_amt_curr = <lfs_charge_line>-from_curr.
+
+                                CLEAR:  lv_amount1, lv_amount2, lv_amount3, lv_amount4.
+                                lv_amount1 = <lfs_resp_calc_sheet_charge>-tccs_amount.
+                                lv_amount2 = ( <lfs_charge_line>-to_amount / 10000 ).
+                                lv_amount3 = <lfs_resp_calc_sheet_charge>-line_amt.
+                                lv_amount4 = ( <lfs_charge_line>-from_amount / 10000 ).
+
+                                IF ( <lfs_resp_calc_sheet_charge>-tccs_amount = ( <lfs_charge_line>-to_amount / 10000 )     AND
+                                     <lfs_resp_calc_sheet_charge>-line_amt    = ( <lfs_charge_line>-from_amount / 10000 ) ) OR
+                                   ( lv_amount1 = lv_amount2 AND lv_amount3 = lv_amount4 ).
+                                  APPEND <lfs_resp_calc_sheet_charge> TO lt_res_calc_sheet_tmp.
+
+*                                  IF <lfs_different_curr_posting> = abap_false.
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-to_curr .
+                                    <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-to_amount / 10000 ).
+                                  ENDIF.
+
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-to_curr .
+                                    <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-to_amount / 10000 ).
+                                  ENDIF.
+
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-to_curr .
+                                    <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-to_amount / 10000 ).
+                                  ENDIF.
+
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-from_curr .
+                                    <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-from_amount / 10000 ).
+                                  ENDIF.
+
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-from_curr .
+                                    <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-from_amount / 10000 ).
+                                  ENDIF.
+
+                                  IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-from_curr .
+                                    <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-from_amount / 10000 ).
+                                  ENDIF.
+*                                  ENDIF.
+                                ENDIF.
+                              ENDLOOP.
+                              IF sy-subrc = 4.
+                                "....CASE 5
+                                LOOP AT <lfs_resp_calc_sheet>-charges-chargeelements ASSIGNING <lfs_resp_calc_sheet_charge> WHERE tcet084         = <lfs_charge_line>-type_code
+                                                                                                                              AND currcode016     = <lfs_charge_line>-to_curr
+                                                                                                                              AND currcode016lcl  = <lfs_charge_line>-from_curr.
+                                  CLEAR:  lv_amount1, lv_amount2, lv_amount3, lv_amount4.
+                                  lv_amount1 = <lfs_resp_calc_sheet_charge>-amount.
+                                  lv_amount2 = ( <lfs_charge_line>-to_amount / 10000 ).
+                                  lv_amount3 = <lfs_resp_calc_sheet_charge>-amountlcl.
+                                  lv_amount4 = ( <lfs_charge_line>-from_amount / 10000 ).
+
+                                  IF ( <lfs_resp_calc_sheet_charge>-amount    = ( <lfs_charge_line>-to_amount / 10000 ) AND
+                                       <lfs_resp_calc_sheet_charge>-amountlcl = ( <lfs_charge_line>-from_amount / 10000 ) ) OR
+                                     ( lv_amount1 = lv_amount2 AND lv_amount3 = lv_amount4 ).
+                                    APPEND <lfs_resp_calc_sheet_charge> TO lt_res_calc_sheet_tmp.
+
+*                                  IF <lfs_different_curr_posting> = abap_false.
+                                    IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-to_curr .
+                                      <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-to_amount / 10000 ).
+                                    ENDIF.
+
+                                    IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-to_curr .
+                                      <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-to_amount / 10000 ).
+                                    ENDIF.
+
+                                    IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-to_curr .
+                                      <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-to_amount / 10000 ).
+                                    ENDIF.
+
+                                    IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-from_curr .
+                                      <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-from_amount / 10000 ).
+                                    ENDIF.
+
+                                    IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-from_curr .
+                                      <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-from_amount / 10000 ).
+                                    ENDIF.
+
+                                    IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-from_curr .
+                                      <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-from_amount / 10000 ).
+                                    ENDIF.
+*                                  ENDIF.
+                                  ENDIF.
+                                ENDLOOP.
+                                IF sy-subrc = 4.
+                                  "....CASE 6
+                                  LOOP AT <lfs_resp_calc_sheet>-charges-chargeelements ASSIGNING <lfs_resp_calc_sheet_charge> WHERE tcet084         = <lfs_charge_line>-type_code
+                                                                                                                                AND currcode016     = <lfs_charge_line>-from_curr
+                                                                                                                                AND currcode016lcl  = <lfs_charge_line>-to_curr.
+                                    CLEAR:  lv_amount1, lv_amount2, lv_amount3, lv_amount4.
+                                    lv_amount1 = <lfs_resp_calc_sheet_charge>-amount.
+                                    lv_amount2 = ( <lfs_charge_line>-from_amount / 10000 ).
+                                    lv_amount3 = <lfs_resp_calc_sheet_charge>-amountlcl.
+                                    lv_amount4 = ( <lfs_charge_line>-to_amount / 10000 ).
+
+                                    IF ( <lfs_resp_calc_sheet_charge>-amount    = ( <lfs_charge_line>-from_amount / 10000 ) AND
+                                         <lfs_resp_calc_sheet_charge>-amountlcl = ( <lfs_charge_line>-to_amount / 10000 ) ) OR
+                                      ( lv_amount1 = lv_amount2 AND lv_amount3 = lv_amount4 ).
+                                      APPEND <lfs_resp_calc_sheet_charge> TO lt_res_calc_sheet_tmp.
+
+*                                  IF <lfs_different_curr_posting> = abap_false.
+                                      IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-to_curr .
+                                        <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-to_amount / 10000 ).
+                                      ENDIF.
+
+                                      IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-to_curr .
+                                        <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-to_amount / 10000 ).
+                                      ENDIF.
+
+                                      IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-to_curr .
+                                        <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-to_amount / 10000 ).
+                                      ENDIF.
+
+                                      IF <lfs_resp_calc_sheet>-charges-currcode016inv = <lfs_charge_line>-from_curr .
+                                        <lfs_resp_calc_sheet>-charges-amountinv = <lfs_resp_calc_sheet>-charges-amountinv + ( <lfs_charge_line>-from_amount / 10000 ).
+                                      ENDIF.
+
+                                      IF <lfs_resp_calc_sheet>-charges-currcode016 = <lfs_charge_line>-from_curr .
+                                        <lfs_resp_calc_sheet>-charges-amount = <lfs_resp_calc_sheet>-charges-amount + ( <lfs_charge_line>-from_amount / 10000 ).
+                                      ENDIF.
+
+                                      IF <lfs_resp_calc_sheet>-charges-currcode016lcl = <lfs_charge_line>-from_curr .
+                                        <lfs_resp_calc_sheet>-charges-amountlcl = <lfs_resp_calc_sheet>-charges-amountlcl + ( <lfs_charge_line>-from_amount / 10000 ).
+                                      ENDIF.
+*                                  ENDIF.
+                                    ENDIF.
+                                  ENDLOOP.
+                                ENDIF.
+                              ENDIF.
+                            ENDIF.
+                          ENDIF.
+                        ENDLOOP.
+                        ".....CONSIDER ONLY THE FILTERED CHARGES BASED ON REQUEST FROM EDI XML
+                        IF lt_res_calc_sheet_tmp IS NOT INITIAL.
+                          <lfs_resp_calc_sheet>-charges-chargeelements  = lt_res_calc_sheet_tmp.
+                          CLEAR: lt_res_calc_sheet_tmp.
+                          IF <lfs_different_curr_posting> = abap_false.
+                            CLEAR: <lfs_resp_calc_sheet>-charges-currencies.
+                          ENDIF.
+                        ENDIF.
+                      ENDIF.
+                    ENDIF.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
